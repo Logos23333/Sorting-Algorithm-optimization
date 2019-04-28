@@ -1,8 +1,8 @@
 /*************************************************************************
-	> File Name: radix_parallel.c
+	> File Name: radix_parallel_cache.c
 	> Author: logos
 	> Mail: 838341114@qq.com 
-	> Created Time: 2019年04月26日 星期五 23时23分01秒
+	> Created Time: 2019年04月27日 Sat 21时46分01秒
  ************************************************************************/
 
 #include<stdio.h>
@@ -15,12 +15,12 @@
 //#define N 1000000000 //the size of unsorted array
 #define seed 1 //the random seed
 #define B 256  //divide the int into 4 parts, the size of each part is 256
+#define BASE 8 
+#define NUM_THREADS 16
 #define NUM 4  //the number of parts divided, the size of int is 4 byte
-#define AVX_SIZE 8
-#define SSE_SIZE 4
-#define SIZE AVX_SIZE
-#define BASE 8
-#define NUM_THREADS 25
+#define M 64  //define the size of cache
+
+pthread_mutex_t mutex;
 
 int max(const void*a, const void *b);
 void sort_gen(int *d, int N);
@@ -79,6 +79,8 @@ void* counting(void *arg){
 	int size=N/NUM_THREADS;
 	int start_index=cnt*size;
 	int end_index=start_index+size;
+	if(cnt==NUM_THREADS-1)
+		end_index=N;
 
 	int and;
 	int shift;
@@ -104,7 +106,6 @@ void* counting(void *arg){
 	for(int i=start_index;i<end_index;i++){
 		int value= (a[i] & (and))>>(shift);
 		int index= value%B; //the index (th) hash bucket
-		//printf("index=%d\n",index);
 		num[cnt*B+index]++;
 	}
 }
@@ -125,6 +126,11 @@ void* hashing(void *arg){
 	int size=N/NUM_THREADS;
 	int start_index=size*cnt;
 	int end_index=start_index+size;
+	if(cnt==NUM_THREADS-1)
+		end_index=N;
+
+	int buffer[M*B]={0};
+	int record[B]={0};
 
 	int and;
 	int shift;
@@ -145,11 +151,35 @@ void* hashing(void *arg){
 		shift=24;
 	}
 
+
 	for(int i=start_index;i<end_index;i++){
 		int value = (a[i]&and)>>shift;
 		int index=value%B;
-		result[D[cnt*B+index]]=a[i];
-		D[cnt*B+index]++;
+
+		buffer[index*M+record[index]]=a[i]; //insert to the buffer
+		record[index]++;
+		if(record[index]>=M){ //the bucket is full
+
+			//put the buffer into result bucket
+			for(int j=0;j<M;j++){
+				result[D[cnt*B+index]]=buffer[index*M+j];
+				buffer[index*M+j]=0;
+				D[cnt*B+index]++;
+			}
+
+			//empty the record array
+			record[index]=0;
+		}
+
+	}
+
+	for(int i=0;i<B;i++){
+		if(record[i]>0){//not empty
+			for(int j=0;j<record[i];j++){
+				result[D[cnt*B+i]]=buffer[i*M+j];
+				D[cnt*B+i]++;
+			}
+		}
 	}
 
 }
@@ -168,8 +198,13 @@ int main(int argc, char *argv[]){
 
 	//start time
 	struct timeval start;
-	struct timeval end;
 	gettimeofday(&start,NULL);
+
+	//init mutex
+	if(pthread_mutex_init(&mutex,NULL)!=0){
+		printf("init mutex fail!\n");
+		return 0;
+	}
 
 	//radix sort with thread-parallel, without cache optimization
 
@@ -196,6 +231,7 @@ int main(int argc, char *argv[]){
 			pthread_create(&threads_one[cnt],NULL,counting,&parameters_one[cnt]);
 		}
 
+
 		for(int i=0;i<NUM_THREADS;i++){
 			pthread_join(threads_one[i],NULL);
 		}
@@ -220,22 +256,6 @@ int main(int argc, char *argv[]){
 			}
 			address+=n[j];
 		}
-
-		/*
-		 * print D matrix & num & n matrix
-		*/
-	
-		/*
-		for(int i=0;i<NUM_THREADS;i++){
-			printf("the %d thread:",i);
-			for(int j=0;j<B;j++){
-				printf("num[%d]=%d;",j,num[i*B+j]);
-				printf("n[%d]=%d;",j,n[j]);
-				printf("D[%d][%d]=%d\n",i,j,D[i*B+j]);
-			}
-			printf("\n");
-		}
-		*/
 
 		//the third step
 		struct parameter parameters_two[NUM_THREADS];
@@ -263,18 +283,17 @@ int main(int argc, char *argv[]){
 	}
 
 	//end time
+	struct timeval end;
 	gettimeofday(&end,NULL);
 
-	long start_time=start.tv_sec;
-	long end_time=end.tv_sec;
-	long duration=end_time-start_time;
-	 //ms
+	long duration=end.tv_sec-start.tv_sec;
 	//print_array(a,N);
 	//print_result(a,N);
 	//time calculation
-	printf("start_time=%ld,end_time=%ld\n",start_time,end_time);
 	printf("time=%ld, number=%d",duration,a[N/2]);
-	
+
+	pthread_mutex_destroy(&mutex);
+
 	free(result);
 	free(a);
 }
